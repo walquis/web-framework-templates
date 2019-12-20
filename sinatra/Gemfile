@@ -1,0 +1,23 @@
+source 'https://rubygems.org'
+
+ruby '2.5.0'
+
+gem 'thin'
+gem 'httparty'
+gem 'sinatra-activerecord'
+gem 'sinatra-contrib' # For e.g. sinatra/namespace
+gem 'sqlite3'
+gem 'json'
+gem 'rake'
+gem 'pry'
+gem 'sinatra-flash'
+
+group :test do
+  gem 'rack-test'
+  gem 'rspec'
+  gem 'capybara'
+  gem 'capybara-webkit'
+  gem 'database_cleaner'
+  gem 'headless'
+  gem 'racksh'
+end

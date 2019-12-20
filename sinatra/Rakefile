@@ -1,0 +1,139 @@
+### The Ruby version used in production
+RUBY_VERSION='2.5.0'
+
+### Pull in rake tasks only when needed
+if $LOAD_PATH.join("") =~ /activerecord/
+  require 'sinatra/activerecord'
+  require 'sinatra/activerecord/rake'
+end
+
+begin
+  if require 'rspec/core/rake_task'
+    RSpec::Core::RakeTask.new(:spec)
+    task :default => :spec  # Make the spec task a dependency of the default task
+  end
+rescue LoadError
+  # no rspec available
+end
+
+task default: :test
+
+desc "Run all tests"
+task :test do
+  $stdout.puts "******* NOTE: Look for output from Javascript tests in log/test.log"
+  ENV['RACK_ENV'] = 'test'
+  require './app'
+  Dir['./test/**/test*.rb'].each { |f| load f}
+end
+
+$appname = 'sinatra_app'
+$svc_user = ENV['LOGNAME']
+$data_dir = '/data/sinatra_app'
+$cmpny = 'company'
+
+# Four locations in play here...
+# 1) The current directory - a Git repo from which we're deploying
+# 2) The destination for the app - /site/company/<appname>/<some-sha>, symlinked as /site/company/<appname>/current
+# 3) The Runit "available" service dir - /site/company/service-srv_des-available/<appname>
+# 4) The Runit-managed "live" service dir - /site/company/service-srv_des/<appname>, ultimately a symlink to "available"
+#
+# Summary: Pull down newest code, stop the service, copy the code to destination, refresh Runit service "available" dir,
+#   and symlink "live" to "available" (after the pattern of Apache and Nginx website configs).
+#
+def deploy deploy_mode='development', port=9999
+  # Assumes...
+  # - Current directory is a viable git repo
+  # - the desired Ruby is in the PATH in runit/run
+  # - Bundler is installed
+  # - /site/company exists and is writable by current user
+  # - Runit is installed and configured
+
+  sha = `git rev-parse --short HEAD`.strip
+  puts "SHA = '#{sha}'"
+
+  appname = deploy_mode=='production' ? $appname : "#{$appname}-#{deploy_mode}"
+  deploy_root = "/site/#{$cmpny}/#{appname}"
+  runit_root = "/site/#{$cmpny}/service-#{$svc_user}"
+  runit_available_root = "#{runit_root}-available"
+  runit_avail_app = "#{runit_available_root}/#{appname}"
+  dest = "#{deploy_root}/#{sha}"
+  if File.exist? dest
+    puts "#{sha} is already deployed"
+    exit 0
+  end
+
+  # Remove the symlink, prompting Runit to stop <appname> and all related processes
+  puts `sv down #{appname}`  # Make sure the app goes down
+
+  puts `rm -rf #{runit_avail_app}`
+  puts `rm -f #{runit_root}/#{appname}`
+  [ $data_dir, runit_root, "#{runit_avail_app}", dest].each do |dir|
+    mkdir_p dir
+  end
+
+  # Copy the new version into place...
+  puts `rsync -az . #{dest} --exclude=.git --exclude=vendor`
+
+  # Is there already a vendor directory in current?  Let's copy it, to save time...
+  if File.exist? "#{deploy_root}/current/vendor"
+    puts `rsync -az "#{deploy_root}/current/vendor" #{dest}`
+  end
+
+  cd dest do
+    #the following block is necessary when running inside bundle exec. More info here: http://bundler.io/man/bundle-exec.1.html
+    cmd = "PATH=/site/apps/ruby-#{RUBY_VERSION}/bin:/bin:/usr/bin bundle install --path vendor/bundle --without test"
+    if Object.const_defined? 'Bundler'
+      Bundler.with_clean_env do
+        sh cmd
+      end
+    else
+      sh cmd
+    end
+  end
+
+  cd deploy_root do
+    puts `ln -nsf #{sha} current`
+  end
+
+  # Set up the Runit service files in the "available" directory/run...
+  puts `cp -r #{deploy_root}/current/runit/* #{runit_avail_app}`
+
+  cd "#{runit_avail_app}/log" do
+    # Tweak the log/run file to reflect the actual appname
+    puts `perl -pi -e 's/#{$appname}(-\w+)?/#{appname}/g' run`
+  end
+
+  cd runit_avail_app do
+    mkdir_p 'env'
+    `echo #{deploy_mode} > env/RACK_ENV` # Set mode (production or development)
+    `echo #{deploy_root}/current > env/RUN_DIR` # Tell Runit where the app lives
+    `echo #{port} > env/SESSIONS_PORT` # Which port to run the app on
+    `echo #{RUBY_VERSION} > env/RUBY_VERSION`
+    `echo #{ENV['LOGNAME']} > env/LOGNAME` # Since Runit won't have this in its env
+    `head /dev/urandom | md5sum - | cut -d' ' -f1 > env/SESSION_SECRET`
+
+  end
+  # Update the logging config...
+  mkdir_p "/sitelogs/#{$cmpny}/#{appname}"
+  puts `mv #{runit_avail_app}/log-config /sitelogs/#{$cmpny}/#{appname}/config`
+
+  # Tell Runit to set it all in motion
+  cd runit_root do
+    puts `ln -nsf #{runit_avail_app}`
+  end
+end
+
+desc "Deploy to test (on local machine)"
+task :deploy_test do
+  deploy 'test', 3003
+end
+
+desc "Deploy to UAT (on local machine)"
+task :deploy_uat do
+  deploy 'uat', 6789
+end
+
+desc "Deploy to production (on local machine)"
+task :deploy_prod do
+  deploy 'production', 2345
+end
