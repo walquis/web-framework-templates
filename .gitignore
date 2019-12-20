@@ -1,5 +1,6 @@
-/**/*/vendor/bundle
+*/vendor/bundle/
 *.rbc
+*.swp
 capybara-*.html
 /db/*.sqlite3
 /db/*.sqlite3-journal
